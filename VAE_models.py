@@ -1,0 +1,169 @@
+from keras.layers import Input, Lambda
+from keras.layers.core import Dense, Flatten, RepeatVector, Dropout
+from keras.layers.convolutional import Convolution1D
+from keras.layers.recurrent import GRU
+from keras.layers.normalization import BatchNormalization
+from keras.models import load_model
+from keras import backend as K
+from keras.models import Model
+from keras.layers.merge import Concatenate
+import tensorflow as tf 
+from tgru_k2_gpu import TerminalGRU
+
+#ENCODER MODEL
+
+def encoder_model(params):
+    #Input Layer
+    x_in = Input(shape=(params['MAX_LEN'], params['NCHARS']), name='input_molecule_smi')
+
+    #Convolution Layers
+    x = Convolution1D(int(params['conv_dim_depth'] * params['conv_d_growth_factor']), 
+        int(params['conv_dim_width'] * params['conv_w_growth_factor']), activation='tanh', name='encoder_cov0')(x_in)
+
+    if params['batchnorm_conv']:
+        x = BatchNormalization(axis=-1, name='encoder_norm0')(x)
+
+    for j in range(1, params['conv_depth'] - 1):
+        x = Convolution1D(int(params['conv_dim_depth'] * params['conv_d_growth_factor'] ** (j)), 
+            int(params['conv_dim_width'] * params['conv_w_growth_factor'] ** (j)),
+            activation='tanh',
+            name=f"encoder_conv{j}")(x)
+        if params['batchnorm_conv']:
+            x = BatchNormalization(axis=-1, name=f"encoder_norm{j}")(x)
+
+    x = Flatten()(x)
+    
+    #Middle Layers
+    if params['middle_layer'] > 0:
+        middle = Dense(int(params['hidden_dim'] * params["hg_growth_factor"] ** (params['middle_layer'] - 1)),
+                activation=params['activation'],
+                name='encoder_dense0')(x)
+        if params['dropout_rate_mid'] > 0:
+                middle = Dropout(params['dropout_rate_mid'])(middle)
+        if params['batchnorm_mid']:
+                middle = BatchNormalization(axis=-1, name='encoder_dense0_norm')(middle)
+            
+        for i in range(2, params['middle_layer'] + 1):
+            middle = Dense(int(params['hidden_dim'] * params['hg_growth_factor'] ** (params['middle_layer'] - 1)),
+                    activation=params['activation'], 
+                    name=f'encoder_dense{i}')(middle)
+            if params['dropout_rate_mid'] > 0:
+                middle = Dropout(params['dropout_rate_mid'])(middle)
+            if params['batchnorm_mid']:
+                middle = BatchNormalization(axis=-1, name=f'encoder_dense{i}_norm')(middle)
+    else:
+        middle = x
+    
+    z_mean = Dense(params['hidden_dim'], name='z_mean_sample')(middle)
+
+    return Model(x_in, [z_mean, middle], name='encoder')
+
+def load_encoder(params):
+    return load_model(params['encoder_weights_file'])
+
+#DECODER MODEL
+def decoder_model(params):
+    z_in = Input(shape=(params['hidden_dim'],), name='decoder_input')
+    tru_seq_in = Input(shape=(params["MAX_LEN"], params["NCHARS"]),
+                name='decoder_true_seq_input')
+
+    z = Dense(int(params['hidden_dim']),
+            activation=params['activation'],
+            name='decoder_dense0')(z_in)
+
+    if params['dropout_rate_mid'] > 0:
+        z = Dropout(params['dropout_rate_mid'])(z)
+    if params['batchnorm_mid']:
+        z = BatchNormalization(axis=-1, name="decoder_dense0_norm")(z)
+
+    for i in range(1, params['middle_layer']):
+        z = Dense(int(params['hidden_dim'] * params['hg_growth_factor'] ** (i)),
+            activation=params['activation'],
+            name=f"decoder_dense{i}")(z)
+        if params['dropout_rate_mid'] > 0:
+            z = Dropout(params["dropout_rate_mid"])(z)
+        if params['batchnorm_mid']:
+            z = BatchNormalization(axis=-1, name=f"decoder_dense{i}")
+
+    z_reps = RepeatVector(params["MAX_LEN"])(z)
+
+    if params['gru_depth'] > 1:
+        x_dec = GRU(params["recurrent_dim"],
+                    return_sequences=True, activation='tanh',
+                    name='decoder_gru0')(z_reps)
+
+        for k in range(params['gru_depth'] - 2):
+            x_dec = GRU(params['recurrent_dim'],
+                    return_sequences=True, activation='tanh',
+                    name=f'decoder_gru{k+1}')(x_dec)
+    
+        x_out = TerminalGRU(params['NCHARS'],
+                            rnd_seed=params['RAND_SEED'],
+                            recurrent_dropout=params['tgru_dropout'],
+                            return_sequences=True,
+                            activation='softmax',
+                            temperature=0.01,
+                            name='decoder_tgru',
+                            implementation=params['terminal_GRU_implementation'])([x_dec, tru_seq_in])
+    return Model([z_in, tru_seq_in], x_out, name='decoder')
+
+def load_decoder(params):
+    return load_model(params['decoder_weights_file'], custom_objects={'TerminalGRU': TerminalGRU})
+
+#VARIATIONAL LAYERS
+def variational_layers(z_mean, enc, kl_loss_var, params):
+    # @inp mean : mean generated from encoder
+    # @inp enc : output generated by encoding
+    # @inp params : parameter dictionary passed throughout entire model.
+
+    def sampling(args):
+        z_mean, z_log_var = args
+
+        epsilon = K.random_normal_variable(shape=(params['batch_size'], params['hidden_dim']), mean=0.00, scale=1.00)
+
+        z_rand = z_mean + K.exp(z_log_var / 2) * kl_loss_var * epsilon
+        return K.in_train_phase(z_rand, z_mean)
+
+    # variational encoding
+    z_log_var_layer = Dense(params['hidden_dim'], name='z_log_var_sample')
+    z_log_var = z_log_var_layer(enc)
+
+    z_mean_log_var_output = Concatenate(name='z_mean_log_var')([z_mean, z_log_var])
+
+    z_samp = Lambda(sampling)([z_mean, z_log_var])
+
+    if params['batchnorm_vae']:
+        z_samp = BatchNormalization(axis=-1)(z_samp)
+    return z_samp, z_mean_log_var_output
+
+
+#PROPERTY PREDICTOR MODEL
+def property_predictor_model(params):
+    if ('reg_prop_tasks' not in params) and ('logit_prop_tasks' not in params):
+        raise ValueError("Must have a regression and/or logistic task for property prediction in params")
+
+    ls_in = Input(shape=(params['hidden_dim'],), name='prop_pred_input')
+
+    prop_mid = Dense(params['prop_hidden_dim'],
+                activation=params['prop_pred_activation'])(ls_in)
+    
+    if params['prop_pred_dropout'] > 0:
+        prop_mid = Dropout(params['prop_pred_dropout'])(prop_mid)
+    
+    if params['prop_pred_depth'] > 1:
+        for p_i in range(1, params['prop_pred_depth']):
+            prop_mid = Dense(int(params['prop_hidden_dim'] * params['prop_growth_factor'] ** p_i),
+                        activation=params['prop_pred_activation'],
+                        name=f'property_predictor_dense{p_i}')(prop_mid)
+            if params['prop_pred_dropout'] > 0:
+                prop_mid = Dropout(params['prop_pred_dropout'])(prop_mid)
+            if 'prop_batchnorm' in params and params['prop_batchnorm']:
+                prop_mid = BatchNormalization()(prop_mid)
+    
+    if ('reg_prop_tasks' in params) and (len(params['reg_prop_tasks']) > 0):
+        reg_prop_pred = Dense(len(params['reg_prop_tasks']), activation='linear',
+                        name="reg_property_output")(prop_mid)
+    return Model(ls_in, reg_prop_pred, name="property_predictor")
+
+def load_property_predictor(params):
+    return load_model(params['prop_pred_weights_file'])
