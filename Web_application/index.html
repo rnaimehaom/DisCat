@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Home Page{% endblock %}
+{% block content %}
+<style type='text/css'>
+</style>
+<h1><center><font size='48' color='#b8e4ef'><br><br>Generate Molecule with<br>
+an Optimized Binding<br>
+Energy with N2</font></center></h1>
+<p><br></p>
+<div class="wrap"><center>
+	<form action="{{ url_for('molecule')}}"method='post'>
+      <input type="text" name='val' style='width:400px; height:40px; border-radius:5px' required="required" placeholder="  Binding Energy Value">
+   <p></p>
+   <button type="submit" style= 'height=40px'class="btn btn-outline-success my-2 my-sm-0">Create Molecule</button>
+        <i class="fa fa-search"></i>
+    </form>
+    <p></p>
+    <p><font color='b8e4ef'><b>{{molecule_text}}</b>{{molecule_text1}}</font></p>
+</center></div>
+
+{% endblock %}
