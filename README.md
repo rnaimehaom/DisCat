@@ -19,7 +19,10 @@ The web server consists of a text box ,where the user can input their desired bi
 value to go through the model and generate a molecule in SMILES representation. However, the server is yet to be deployed on the internet for
 public use.
 
-![Picture1](https://user-images.githubusercontent.com/66485156/112567796-706e4480-8daf-11eb-8cb4-2210534c9dd2.png)  ![Capture](https://user-images.githubusercontent.com/66485156/112567825-77955280-8daf-11eb-96be-d0a78fbbfe7d.PNG)
+Before           |  After
+:-------------------------:|:-------------------------:
+![Picture1](https://user-images.githubusercontent.com/66485156/112567796-706e4480-8daf-11eb-8cb4-2210534c9dd2.png)  |  ![Capture](https://user-images.githubusercontent.com/66485156/112567825-77955280-8daf-11eb-96be-d0a78fbbfe7d.PNG)
+  
 
 ## References
 * Major reference and code from [Automatic Chemical Design Using a Data-Driven Continuous Representation of Molecules](https://github.com/aspuru-guzik-group/chemical_vae)
